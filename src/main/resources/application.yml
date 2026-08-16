@@ -1,0 +1,48 @@
+server:
+  port: 8765
+
+spring:
+  threads:
+    virtual:
+      enabled: true
+  application:
+    name: openworker-spring-ai
+  
+  # SQLite Database Configuration
+  datasource:
+    url: jdbc:sqlite:openworker.db
+    driver-class-name: org.sqlite.JDBC
+    # For dev purposes, initialize schema directly or let Flyway do it
+  sql:
+    init:
+      mode: always
+
+  # Spring AI configuration options
+  ai:
+    openai:
+      chat:
+        enabled: true
+        options:
+          model: gpt-4o
+    vertex:
+      ai:
+        gemini:
+          chat:
+            enabled: true
+            options:
+              model: gemini-1.5-pro
+    anthropic:
+      chat:
+        enabled: true
+        options:
+          model: claude-3-5-sonnet-20240620
+    ollama:
+      chat:
+        enabled: true
+        options:
+          model: llama3
+
+logging:
+  level:
+    org.springframework.ai: INFO
+    com.openworker: DEBUG
