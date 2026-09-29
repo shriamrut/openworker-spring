@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "test-mcp-server": {
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}

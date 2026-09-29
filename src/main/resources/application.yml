@@ -19,30 +19,100 @@ spring:
 
   # Spring AI configuration options
   ai:
-    openai:
-      chat:
+    retry:
+      max-attempts: 3  #Only retry 3 times instead of default 10
+      on-client-errors: false       # Do not retry on 4xx client errors
+    mcp:
+      client:
         enabled: true
+        name: openworker-mcp-client
+        version: 1.0.0
+        type: SYNC
+        request-timeout: 20s
+        toolcallback:
+          enabled: true
+    openai:
+      base-url: http://localhost:1234/v1
+      api-key: lm-studio
+      chat:
+        enabled: false
         options:
-          model: gpt-4o
-    vertex:
-      ai:
-        gemini:
-          chat:
-            enabled: true
-            options:
-              model: gemini-1.5-pro
+          model: prism-ml/bonsai-27b
+    google:
+      enabled: false
+      genai:
+        api-key: ${GEMINI_API_KEY:<TOKEN>}
+        chat:
+          options:
+            model: gemini-flash-latest
     anthropic:
       chat:
-        enabled: true
+        enabled: false
         options:
           model: claude-3-5-sonnet-20240620
     ollama:
       chat:
-        enabled: true
+        enabled: false
         options:
-          model: llama3
+          model: llama3.2:1b
 
 logging:
   level:
     org.springframework.ai: INFO
     com.openworker: DEBUG
+
+openworker:
+  mcp:
+    servers-configuration: classpath:mcp-servers.json
+    request-timeout: 20s
+  agent:
+    engine:
+      type: langgraph  # Execution engine: 'langgraph' (ReAct StateGraph) or 'default' (Spring AI ToolCallingAdvisor)
+      max-steps: 1000
+      default:
+        prompt: >
+          You are OpenWorker, an autonomous AI software engineer and coworker.
+          You have access to tools to explore the filesystem, run commands, and accomplish user tasks.
+          Always explain your reasoning briefly before performing tool operations.
+  models:
+    default-provider: openai
+    default-model: google/gemma-4-e2b
+    providers:
+      openai:
+        name: "OpenAI / Compatible"
+        base-url: ${OPENAI_BASE_URL:http://localhost:1234/v1}
+        api-key: ${OPENAI_API_KEY:lm-studio}
+        default-model: ${OPENAI_MODEL:google/gemma-4-e2b}
+        models:
+          - google/gemma-4-e2b
+          - gpt-4o
+          - gpt-4o-mini
+          - gpt-4.1
+          - o3-mini
+      ollama:
+        name: "Ollama"
+        base-url: ${OLLAMA_BASE_URL:https://w15lrx35-11434.use.devtunnels.ms}
+        default-model: ${OLLAMA_MODEL:qwen3.8:latest}
+        models:
+          - llama3.2:1b
+          - qwen2.5-coder:1.5b
+          - deepseek-r1:1.5b
+          - mistral
+      anthropic:
+        name: "Anthropic Claude"
+        base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
+        api-key: ${ANTHROPIC_API_KEY:}
+        default-model: ${ANTHROPIC_MODEL:claude-3-5-sonnet-20241022}
+        models:
+          - claude-3-5-sonnet-20241022
+          - claude-3-5-haiku-20241022
+          - claude-3-opus-20240229
+      google-genai:
+        name: "Google Gemini"
+        api-key: ${GEMINI_API_KEY:""}
+        default-model: ${GEMINI_MODEL:gemini-flash-latest}
+        models:
+          - gemini-flash-latest
+          - gemini-3.6-flash
+          - gemini-flash-lite-latest
+          - gemini-pro-latest

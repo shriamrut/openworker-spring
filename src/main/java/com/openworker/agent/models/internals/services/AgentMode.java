@@ -1,4 +1,4 @@
-package com.openworker.agent;
+package com.openworker.agent.models.internals.services;
 
 public enum AgentMode {
     DISCUSS, // Read-only: LLM explores but cannot do write / shell tools
