@@ -7,3 +7,6 @@ refer the starter scripts in `support/scripts` directory. We can use app with lo
 # how to interact with the app?
 To interact with this app use the CLI
 https://github.com/shriamrut/openworker-spring-cli
+
+# want to dynamically inject custom tools?
+Use https://github.com/shriamrut/openworker-test-mcp-server/ as an MCP server
