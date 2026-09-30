@@ -176,6 +176,7 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
 
             RunnableConfig config = RunnableConfig.builder()
                     .threadId(sessionId)
+                    .recursionLimit(maxSteps)
                     .disableCloneState()
                     .build();
 

@@ -76,7 +76,7 @@ class LangGraphTurnEngineTest {
                 convMemoryService,
                 permissionEngine,
                 objectProvider,
-                5
+                15
         );
     }
 
