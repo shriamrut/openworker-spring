@@ -41,6 +41,7 @@ import com.openworker.agent.models.internals.services.PermissionDecision;
 import com.openworker.agent.models.internals.services.ToolRiskClass;
 import com.openworker.agent.services.ChatModelRouter;
 import com.openworker.agent.services.ConversationMemoryService;
+import com.openworker.agent.services.ToolApprovalService;
 import com.openworker.agent.tools.ToolRegistry;
 
 @ExtendWith(MockitoExtension.class)
@@ -57,6 +58,9 @@ class LangGraphTurnEngineTest {
 
     @Mock
     private PermissionEngine permissionEngine;
+
+    @Mock
+    private ToolApprovalService toolApprovalService;
 
     @Mock
     private ChatModel chatModel;
@@ -76,6 +80,7 @@ class LangGraphTurnEngineTest {
                 convMemoryService,
                 permissionEngine,
                 objectProvider,
+                toolApprovalService,
                 15
         );
     }
@@ -217,6 +222,59 @@ class LangGraphTurnEngineTest {
         assertTrue(eventTypes.contains(AgentEventType.COMPLETED));
 
         verify(convMemoryService, atLeastOnce()).saveMessage(eq(sessionId), anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("User Approval in DISCUSS mode: Tool requires approval -> user approves -> tool executes")
+    void testUserApprovalInLangGraphTurnEngine() {
+        String sessionId = "test-session-approval";
+        String userPrompt = "Check file.txt";
+
+        when(convMemoryService.getSession(sessionId)).thenReturn(Optional.empty());
+        when(chatModelRouter.resolveChatModel(any(), any(), any(), any())).thenReturn(chatModel);
+        when(convMemoryService.getConversationHistory(sessionId)).thenReturn(List.of());
+        when(convMemoryService.getSessionMode(sessionId)).thenReturn(AgentMode.DISCUSS);
+
+        AgentTool mockTool = mock(AgentTool.class);
+        ToolCallback mockCallback = mock(ToolCallback.class);
+        when(mockTool.getName()).thenReturn("file_read");
+        when(mockTool.toToolCallback()).thenReturn(mockCallback);
+        when(mockCallback.call(anyString())).thenReturn("File contents: 100");
+        when(toolRegistry.getAllTools()).thenReturn(List.of(mockTool));
+
+        when(permissionEngine.evaluate(eq(AgentMode.DISCUSS), eq("file_read"), any()))
+                .thenReturn(PermissionDecision.askUser("Tool requires approval in DISCUSS mode"));
+
+        when(toolApprovalService.requestApproval(eq(sessionId), eq("call_appr"), eq("file_read"), anyString(), anyString(), any(), eq(180L)))
+                .thenReturn(true);
+
+        ToolCall toolCall = new ToolCall("call_appr", "function", "file_read", "{\"path\": \"file.txt\"}");
+        AssistantMessage step1Assistant = AssistantMessage.builder()
+                .toolCalls(List.of(toolCall))
+                .build();
+        ChatResponse step1Response = new ChatResponse(List.of(new Generation(step1Assistant)));
+
+        AssistantMessage step2Assistant = new AssistantMessage("The file contains 100.");
+        ChatResponse step2Response = new ChatResponse(List.of(new Generation(step2Assistant)));
+
+        AtomicInteger callCount = new AtomicInteger(0);
+        when(chatModel.call(any(Prompt.class))).thenAnswer(invocation -> {
+            if (callCount.getAndIncrement() == 0) {
+                return step1Response;
+            } else {
+                return step2Response;
+            }
+        });
+
+        List<AgentEvent> emittedEvents = new ArrayList<>();
+        turnEngine.executeTurn(sessionId, userPrompt, emittedEvents::add);
+
+        List<AgentEventType> eventTypes = emittedEvents.stream().map(AgentEvent::type).toList();
+        assertTrue(eventTypes.contains(AgentEventType.TOOL_CALL));
+        assertTrue(eventTypes.contains(AgentEventType.TOOL_RESULT));
+        assertTrue(eventTypes.contains(AgentEventType.COMPLETED));
+
+        verify(mockCallback).call("{\"path\": \"file.txt\"}");
     }
 
     @Test

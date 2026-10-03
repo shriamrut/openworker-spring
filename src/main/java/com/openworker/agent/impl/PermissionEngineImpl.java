@@ -27,16 +27,23 @@ public class PermissionEngineImpl implements PermissionEngine {
         Optional<AgentTool> toolOpt = toolRegistry.getTool(toolName);
         if (toolOpt.isEmpty()) {
             log.warn("Permission denied: Tool '{}' is not registered", toolName);
-            return PermissionDecision.deny("Unknow tool: " + toolName);
+            return PermissionDecision.deny("Unknown tool: " + toolName);
         }
         AgentTool tool = toolOpt.get();
         ToolRiskClass risk = tool.getRiskClass();
+
+        if (mode == AgentMode.DISCUSS) {
+            return PermissionDecision.askUser("Tool '" + toolName + "' requires user approval in DISCUSS mode");
+        }
+
         if (risk == ToolRiskClass.READ_ONLY) {
             return PermissionDecision.allow();
         }
+
         return switch (mode) {
-            case DISCUSS, PLAN -> PermissionDecision.deny("Mutating tool " + toolName + " is not permitted in " + mode);
+            case PLAN -> PermissionDecision.deny("Mutating tool " + toolName + " is not permitted in " + mode);
             case FULL -> PermissionDecision.allow();
+            default -> PermissionDecision.deny("Unknown mode: " + mode);
         };
     }
 }
