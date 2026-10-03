@@ -104,6 +104,9 @@ class OpenWorkerIntegrationTest {
         private PermissionEngineImpl permissionEngine;
 
         @Autowired
+        private com.openworker.agent.services.ToolApprovalService toolApprovalService;
+
+        @Autowired
         private FileReadTool fileReadTool;
 
         @Autowired
@@ -432,8 +435,10 @@ class OpenWorkerIntegrationTest {
                         assertThat(permissionEngine.evaluate(AgentMode.FULL, "mcp_service_call", Map.of()).allowed())
                                         .isTrue();
 
-                        // Built-in read tool is allowed in all modes
-                        assertThat(permissionEngine.evaluate(AgentMode.DISCUSS, "file_read", Map.of()).allowed())
+                        // In DISCUSS mode, all tools require user approval; in PLAN mode, read-only tools are allowed
+                        assertThat(permissionEngine.evaluate(AgentMode.DISCUSS, "file_read", Map.of()).needsUserApproval())
+                                        .isTrue();
+                        assertThat(permissionEngine.evaluate(AgentMode.PLAN, "file_read", Map.of()).allowed())
                                         .isTrue();
 
                         // Unregistered tool denied
@@ -639,6 +644,112 @@ class OpenWorkerIntegrationTest {
 
                         // The tool must NOT have been executed
                         assertThat(eventTypes).doesNotContain(AgentEventType.TOOL_RESULT);
+                }
+
+                @Test
+                @DisplayName("DISCUSS mode: tool requires approval, user approves via API -> tool executes and emits TOOL_RESULT")
+                void testDiscussModeApprovalFlow() throws Exception {
+                        List<AgentEvent> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+                        AtomicInteger stepCounter = new AtomicInteger(0);
+                        String sessionId = "discuss-approval-test-" + UUID.randomUUID();
+
+                        InstrumentedToolCallback instrumented = new InstrumentedToolCallback(
+                                        fileReadTool,
+                                        permissionEngine,
+                                        AgentMode.DISCUSS,
+                                        events::add,
+                                        stepCounter,
+                                        15,
+                                        objectMapper,
+                                        null,
+                                        toolApprovalService,
+                                        sessionId);
+
+                        java.util.concurrent.CompletableFuture<String> callFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
+                                        instrumented.call("{\"path\": \"pom.xml\"}"));
+
+                        long deadline = System.currentTimeMillis() + 5000;
+                        AgentEvent permEvent = null;
+                        while (System.currentTimeMillis() < deadline) {
+                                permEvent = events.stream()
+                                                .filter(e -> e.type() == AgentEventType.PERMISSION_REQUIRED)
+                                                .findFirst()
+                                                .orElse(null);
+                                if (permEvent != null) break;
+                                Thread.sleep(50);
+                        }
+                        assertThat(permEvent).isNotNull();
+                        assertThat(permEvent.toolCallId()).isNotNull();
+
+                        mockMvc.perform(post("/api/sessions/" + sessionId + "/permissions/" + permEvent.toolCallId())
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content(objectMapper.writeValueAsString(new com.openworker.agent.models.publics.PermissionDecisionRequest(true))))
+                                        .andExpect(status().isOk());
+
+                        String result = callFuture.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                        assertThat(result).contains("openworker-spring-ai");
+
+                        List<AgentEventType> eventTypes = events.stream().map(AgentEvent::type).toList();
+                        assertThat(eventTypes).contains(AgentEventType.TOOL_CALL);
+                        assertThat(eventTypes).contains(AgentEventType.PERMISSION_REQUIRED);
+                        assertThat(eventTypes).contains(AgentEventType.TOOL_RESULT);
+                }
+
+                @Test
+                @DisplayName("DISCUSS mode: tool requires approval, user rejects via API -> tool is blocked")
+                void testDiscussModeRejectionFlow() throws Exception {
+                        List<AgentEvent> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+                        AtomicInteger stepCounter = new AtomicInteger(0);
+                        String sessionId = "discuss-rejection-test-" + UUID.randomUUID();
+
+                        InstrumentedToolCallback instrumented = new InstrumentedToolCallback(
+                                        fileReadTool,
+                                        permissionEngine,
+                                        AgentMode.DISCUSS,
+                                        events::add,
+                                        stepCounter,
+                                        15,
+                                        objectMapper,
+                                        null,
+                                        toolApprovalService,
+                                        sessionId);
+
+                        java.util.concurrent.CompletableFuture<String> callFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
+                                        instrumented.call("{\"path\": \"pom.xml\"}"));
+
+                        long deadline = System.currentTimeMillis() + 5000;
+                        AgentEvent permEvent = null;
+                        while (System.currentTimeMillis() < deadline) {
+                                permEvent = events.stream()
+                                                .filter(e -> e.type() == AgentEventType.PERMISSION_REQUIRED)
+                                                .findFirst()
+                                                .orElse(null);
+                                if (permEvent != null) break;
+                                Thread.sleep(50);
+                        }
+                        assertThat(permEvent).isNotNull();
+
+                        mockMvc.perform(post("/api/sessions/" + sessionId + "/permissions/" + permEvent.toolCallId())
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content(objectMapper.writeValueAsString(new com.openworker.agent.models.publics.PermissionDecisionRequest(false))))
+                                        .andExpect(status().isOk());
+
+                        String result = callFuture.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                        assertThat(result).contains("Permission Denied");
+
+                        List<AgentEventType> eventTypes = events.stream().map(AgentEvent::type).toList();
+                        assertThat(eventTypes).contains(AgentEventType.TOOL_CALL);
+                        assertThat(eventTypes).contains(AgentEventType.PERMISSION_REQUIRED);
+                        assertThat(eventTypes).doesNotContain(AgentEventType.TOOL_RESULT);
+                }
+
+                @Test
+                @DisplayName("POST /api/sessions/{id}/permissions/{toolCallId} with unknown toolCallId returns 404")
+                void testPermissionDecisionEndpointNotFound() throws Exception {
+                        mockMvc.perform(post("/api/sessions/non-existent-session/permissions/non-existent-call")
+                                        .contentType(MediaType.APPLICATION_JSON)
+                                        .content(objectMapper.writeValueAsString(new com.openworker.agent.models.publics.PermissionDecisionRequest(true))))
+                                        .andExpect(status().isNotFound());
                 }
 
                 /**

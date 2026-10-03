@@ -25,6 +25,7 @@ import com.openworker.agent.models.internals.services.AgentEventType;
 import com.openworker.agent.models.internals.services.AgentMode;
 import com.openworker.agent.services.ChatModelRouter;
 import com.openworker.agent.services.ConversationMemoryService;
+import com.openworker.agent.services.ToolApprovalService;
 import com.openworker.agent.tools.InstrumentedToolCallback;
 import com.openworker.agent.tools.ToolRegistry;
 
@@ -45,6 +46,7 @@ public class TurnEngineImpl implements TurnEngine {
     private final ToolRegistry toolRegistry;
     private final ConversationMemoryService convMemoryService;
     private final PermissionEngine permissionEngine;
+    private final ToolApprovalService toolApprovalService;
     private final ObjectMapper objectMapper;
     private final int maxSteps;
     private final String defaultSystemPrompt;
@@ -57,12 +59,14 @@ public class TurnEngineImpl implements TurnEngine {
             ConversationMemoryService convMemoryService,
             PermissionEngine permissionEngine,
             ObjectProvider<ObjectMapper> objectMapperProvider,
+            ToolApprovalService toolApprovalService,
             @Value("${openworker.agent.engine.max-steps:15}") int maxSteps) {
         this.chatModelRouter = chatModelRouter;
         this.defaultSystemPrompt = defaultSystemPrompt;
         this.toolRegistry = toolRegistry;
         this.convMemoryService = convMemoryService;
         this.permissionEngine = permissionEngine;
+        this.toolApprovalService = toolApprovalService;
         this.objectMapper = (objectMapperProvider != null && objectMapperProvider.getIfAvailable() != null)
                 ? objectMapperProvider.getIfAvailable()
                 : new ObjectMapper();
@@ -75,7 +79,7 @@ public class TurnEngineImpl implements TurnEngine {
             ToolRegistry toolRegistry,
             ConversationMemoryService convMemoryService,
             PermissionEngine permissionEngine) {
-        this(chatModelRouter, defaultSystemPrompt, toolRegistry, convMemoryService, permissionEngine, null, 15);
+        this(chatModelRouter, defaultSystemPrompt, toolRegistry, convMemoryService, permissionEngine, null, null, 15);
     }
 
     @Override
@@ -140,7 +144,9 @@ public class TurnEngineImpl implements TurnEngine {
                                         "TOOL_" + tool.getName(),
                                         "Input: " + input + "\nOutput: " + output
                                 );
-                            }))
+                            },
+                            toolApprovalService,
+                            sessionId))
                     .toList();
 
             log.debug("Instrumented {} tools for multi-step execution (maxSteps={})",

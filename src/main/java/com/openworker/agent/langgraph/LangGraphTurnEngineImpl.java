@@ -50,6 +50,7 @@ import com.openworker.agent.models.internals.services.AgentMode;
 import com.openworker.agent.models.internals.services.PermissionDecision;
 import com.openworker.agent.services.ChatModelRouter;
 import com.openworker.agent.services.ConversationMemoryService;
+import com.openworker.agent.services.ToolApprovalService;
 import com.openworker.agent.tools.ToolRegistry;
 
 import io.micrometer.common.util.StringUtils;
@@ -79,6 +80,7 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
     private final ToolRegistry toolRegistry;
     private final ConversationMemoryService convMemoryService;
     private final PermissionEngine permissionEngine;
+    private final ToolApprovalService toolApprovalService;
     private final ObjectMapper objectMapper;
     private final int maxSteps;
     private final String defaultSystemPrompt;
@@ -92,17 +94,30 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
             ConversationMemoryService convMemoryService,
             PermissionEngine permissionEngine,
             ObjectProvider<ObjectMapper> objectMapperProvider,
+            ToolApprovalService toolApprovalService,
             @Value("${openworker.agent.engine.max-steps:15}") int maxSteps) {
         this.chatModelRouter = chatModelRouter;
         this.defaultSystemPrompt = defaultSystemPrompt;
         this.toolRegistry = toolRegistry;
         this.convMemoryService = convMemoryService;
         this.permissionEngine = permissionEngine;
+        this.toolApprovalService = toolApprovalService;
         this.objectMapper = (objectMapperProvider != null && objectMapperProvider.getIfAvailable() != null)
                 ? objectMapperProvider.getIfAvailable()
                 : new ObjectMapper();
         this.maxSteps = maxSteps > 0 ? maxSteps : 15;
         this.toolExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    }
+
+    public LangGraphTurnEngineImpl(
+            ChatModelRouter chatModelRouter,
+            String defaultSystemPrompt,
+            ToolRegistry toolRegistry,
+            ConversationMemoryService convMemoryService,
+            PermissionEngine permissionEngine,
+            ObjectProvider<ObjectMapper> objectMapperProvider,
+            int maxSteps) {
+        this(chatModelRouter, defaultSystemPrompt, toolRegistry, convMemoryService, permissionEngine, objectMapperProvider, null, maxSteps);
     }
 
     @Override
@@ -354,7 +369,32 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
         // 2. Parse arguments and evaluate permission
         Map<String, Object> arguments = parseArguments(input);
         PermissionDecision decision = permissionEngine.evaluate(sessionMode, toolName, arguments);
-        if (!decision.allowed()) {
+        if (decision.needsUserApproval()) {
+            if (toolApprovalService != null) {
+                log.info("Tool '{}' (callId={}) requires user approval in mode {}", toolName, toolCallId, sessionMode);
+                boolean approved = toolApprovalService.requestApproval(
+                        sessionId,
+                        toolCallId,
+                        toolName,
+                        input,
+                        decision.reason(),
+                        eventConsumer,
+                        180
+                );
+                if (!approved) {
+                    String deniedMsg = "Permission Denied: User rejected execution of tool " + toolName;
+                    log.warn("User rejected tool '{}' (callId={})", toolName, toolCallId);
+                    convMemoryService.saveMessage(sessionId, "TOOL_" + toolName, "Input: " + input + "\nOutput: " + deniedMsg);
+                    return new ToolResponseMessage.ToolResponse(toolCallId, toolName, deniedMsg);
+                }
+            } else {
+                String deniedMsg = "Permission Denied: " + decision.reason();
+                log.warn("No approval service configured, blocking tool '{}' in mode {}: {}", toolName, sessionMode, decision.reason());
+                eventConsumer.accept(new AgentEvent(AgentEventType.PERMISSION_REQUIRED, deniedMsg, toolName, toolCallId));
+                convMemoryService.saveMessage(sessionId, "TOOL_" + toolName, "Input: " + input + "\nOutput: " + deniedMsg);
+                return new ToolResponseMessage.ToolResponse(toolCallId, toolName, deniedMsg);
+            }
+        } else if (!decision.allowed()) {
             String deniedMsg = "Permission Denied: " + decision.reason();
             log.warn("Blocked tool '{}' in mode {}: {}", toolName, sessionMode, decision.reason());
             eventConsumer.accept(new AgentEvent(AgentEventType.PERMISSION_REQUIRED, deniedMsg, toolName, toolCallId));

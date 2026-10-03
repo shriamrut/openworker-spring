@@ -20,6 +20,7 @@ import com.openworker.agent.models.internals.services.AgentEvent;
 import com.openworker.agent.models.internals.services.AgentEventType;
 import com.openworker.agent.models.internals.services.AgentMode;
 import com.openworker.agent.models.internals.services.PermissionDecision;
+import com.openworker.agent.services.ToolApprovalService;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -51,6 +52,8 @@ public class InstrumentedToolCallback implements ToolCallback {
     private final int maxSteps;
     private final ObjectMapper objectMapper;
     private final BiConsumer<String, String> stepRecorder;
+    private final ToolApprovalService toolApprovalService;
+    private final String sessionId;
 
     public InstrumentedToolCallback(
             AgentTool delegateTool,
@@ -61,6 +64,20 @@ public class InstrumentedToolCallback implements ToolCallback {
             int maxSteps,
             ObjectMapper objectMapper,
             BiConsumer<String, String> stepRecorder) {
+        this(delegateTool, permissionEngine, sessionMode, eventConsumer, stepCounter, maxSteps, objectMapper, stepRecorder, null, null);
+    }
+
+    public InstrumentedToolCallback(
+            AgentTool delegateTool,
+            PermissionEngine permissionEngine,
+            AgentMode sessionMode,
+            Consumer<AgentEvent> eventConsumer,
+            AtomicInteger stepCounter,
+            int maxSteps,
+            ObjectMapper objectMapper,
+            BiConsumer<String, String> stepRecorder,
+            ToolApprovalService toolApprovalService,
+            String sessionId) {
         this.delegateTool = Objects.requireNonNull(delegateTool, "delegateTool must not be null");
         this.delegateCallback = Objects.requireNonNull(delegateTool.toToolCallback(), "delegateCallback must not be null");
         this.permissionEngine = Objects.requireNonNull(permissionEngine, "permissionEngine must not be null");
@@ -70,6 +87,8 @@ public class InstrumentedToolCallback implements ToolCallback {
         this.maxSteps = maxSteps > 0 ? maxSteps : 15;
         this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
         this.stepRecorder = stepRecorder;
+        this.toolApprovalService = toolApprovalService;
+        this.sessionId = sessionId;
     }
 
     @Override
@@ -105,7 +124,37 @@ public class InstrumentedToolCallback implements ToolCallback {
 
         // 4. Enforce PermissionEngine
         PermissionDecision decision = permissionEngine.evaluate(sessionMode, toolName, arguments);
-        if (!decision.allowed()) {
+        if (decision.needsUserApproval()) {
+            if (toolApprovalService != null) {
+                log.info("Tool '{}' (callId={}) requires user approval in mode {}", toolName, toolCallId, sessionMode);
+                boolean approved = toolApprovalService.requestApproval(
+                        sessionId != null ? sessionId : "unknown",
+                        toolCallId,
+                        toolName,
+                        input,
+                        decision.reason(),
+                        eventConsumer,
+                        180
+                );
+                if (!approved) {
+                    String denialMsg = "Permission Denied: User rejected execution of tool " + toolName;
+                    log.warn("User rejected tool '{}' (callId={})", toolName, toolCallId);
+                    safeEmit(eventConsumer, new AgentEvent(AgentEventType.PERMISSION_REQUIRED, denialMsg, toolName, toolCallId));
+                    if (stepRecorder != null) {
+                        stepRecorder.accept(input, denialMsg);
+                    }
+                    return denialMsg;
+                }
+            } else {
+                String denialMsg = "Permission Denied: " + decision.reason();
+                log.warn("No approval service configured, blocking tool '{}' in mode {}: {}", toolName, sessionMode, decision.reason());
+                safeEmit(eventConsumer, new AgentEvent(AgentEventType.PERMISSION_REQUIRED, denialMsg, toolName, toolCallId));
+                if (stepRecorder != null) {
+                    stepRecorder.accept(input, denialMsg);
+                }
+                return denialMsg;
+            }
+        } else if (!decision.allowed()) {
             String denialMsg = "Permission Denied: " + decision.reason();
             log.warn("Blocked tool '{}' in mode {}: {}", toolName, sessionMode, decision.reason());
             safeEmit(eventConsumer, new AgentEvent(AgentEventType.PERMISSION_REQUIRED, denialMsg, toolName, toolCallId));
