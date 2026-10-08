@@ -51,6 +51,7 @@ import com.openworker.agent.models.internals.services.PermissionDecision;
 import com.openworker.agent.services.ChatModelRouter;
 import com.openworker.agent.services.ConversationMemoryService;
 import com.openworker.agent.services.ToolApprovalService;
+import com.openworker.agent.services.TurnExecutionManager;
 import com.openworker.agent.tools.ToolRegistry;
 
 import io.micrometer.common.util.StringUtils;
@@ -85,6 +86,7 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
     private final int maxSteps;
     private final String defaultSystemPrompt;
     private final ExecutorService toolExecutor;
+    private final TurnExecutionManager turnExecutionManager;
 
     @Autowired
     public LangGraphTurnEngineImpl(
@@ -95,7 +97,8 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
             PermissionEngine permissionEngine,
             ObjectProvider<ObjectMapper> objectMapperProvider,
             ToolApprovalService toolApprovalService,
-            @Value("${openworker.agent.engine.max-steps:15}") int maxSteps) {
+            @Value("${openworker.agent.engine.max-steps:15}") int maxSteps,
+            TurnExecutionManager turnExecutionManager) {
         this.chatModelRouter = chatModelRouter;
         this.defaultSystemPrompt = defaultSystemPrompt;
         this.toolRegistry = toolRegistry;
@@ -107,6 +110,21 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
                 : new ObjectMapper();
         this.maxSteps = maxSteps > 0 ? maxSteps : 15;
         this.toolExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        this.turnExecutionManager = turnExecutionManager != null
+                ? turnExecutionManager
+                : new TurnExecutionManager(toolApprovalService);
+    }
+
+    public LangGraphTurnEngineImpl(
+            ChatModelRouter chatModelRouter,
+            String defaultSystemPrompt,
+            ToolRegistry toolRegistry,
+            ConversationMemoryService convMemoryService,
+            PermissionEngine permissionEngine,
+            ObjectProvider<ObjectMapper> objectMapperProvider,
+            ToolApprovalService toolApprovalService,
+            int maxSteps) {
+        this(chatModelRouter, defaultSystemPrompt, toolRegistry, convMemoryService, permissionEngine, objectMapperProvider, toolApprovalService, maxSteps, null);
     }
 
     public LangGraphTurnEngineImpl(
@@ -117,7 +135,7 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
             PermissionEngine permissionEngine,
             ObjectProvider<ObjectMapper> objectMapperProvider,
             int maxSteps) {
-        this(chatModelRouter, defaultSystemPrompt, toolRegistry, convMemoryService, permissionEngine, objectMapperProvider, null, maxSteps);
+        this(chatModelRouter, defaultSystemPrompt, toolRegistry, convMemoryService, permissionEngine, objectMapperProvider, null, maxSteps, null);
     }
 
     @Override
@@ -135,6 +153,14 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
                             Consumer<AgentEvent> eventConsumer) {
         log.info("Starting LangGraph ReAct turn for session: {}, providerOverride={}, modelOverride={}",
                 sessionId, providerOverride, modelOverride);
+
+        if (!turnExecutionManager.startTurn(sessionId, Thread.currentThread())) {
+            String busyMsg = "A turn is already in progress for session: " + sessionId;
+            log.warn(busyMsg);
+            eventConsumer.accept(new AgentEvent(AgentEventType.ERROR, busyMsg, null, null));
+            return;
+        }
+
         eventConsumer.accept(new AgentEvent(AgentEventType.STARTED,
                 "Turn started for session " + sessionId, null, null));
 
@@ -179,7 +205,7 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
 
             // 5. Construct LangGraph ReAct StateGraph
             StateGraph<AgentGraphState> workflow = new StateGraph<>(AgentGraphState.SCHEMA, AgentGraphState::new)
-                    .addNode("agent", node_async(state -> callModel(state, chatModel, chatOptions, eventConsumer)))
+                    .addNode("agent", node_async(state -> callModel(state, sessionId, chatModel, chatOptions, eventConsumer)))
                     .addNode("tools", node_async(state -> executeTools(state, sessionId, sessionMode, toolsByName, eventConsumer)))
                     .addEdge(GraphDefinition.START, "agent")
                     .addConditionalEdges("agent",
@@ -204,14 +230,40 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
                     config
             );
 
-            log.info("LangGraph ReAct turn completed successfully for session: {}", sessionId);
-            eventConsumer.accept(new AgentEvent(AgentEventType.COMPLETED,
-                    "Turn completed for session " + sessionId, null, null));
+            if (turnExecutionManager.isHalted(sessionId) || Thread.currentThread().isInterrupted()) {
+                log.info("LangGraph ReAct turn halted for session: {}", sessionId);
+                convMemoryService.saveMessage(sessionId, MessageType.ASSISTANT.name(), "[Conversation halted by user]");
+                eventConsumer.accept(new AgentEvent(AgentEventType.HALTED,
+                        "Conversation halted by user", null, null));
+            } else {
+                log.info("LangGraph ReAct turn completed successfully for session: {}", sessionId);
+                eventConsumer.accept(new AgentEvent(AgentEventType.COMPLETED,
+                        "Turn completed for session " + sessionId, null, null));
+            }
 
         } catch (Exception ex) {
-            log.error("Error occurred during LangGraph turn execution for session {}", sessionId, ex);
-            eventConsumer.accept(new AgentEvent(AgentEventType.ERROR, ex.getMessage(), null, null));
+            if (turnExecutionManager.isHalted(sessionId) || Thread.currentThread().isInterrupted() || ex instanceof InterruptedException) {
+                log.info("LangGraph ReAct turn halted for session: {}", sessionId);
+                convMemoryService.saveMessage(sessionId, MessageType.ASSISTANT.name(), "[Conversation halted by user]");
+                eventConsumer.accept(new AgentEvent(AgentEventType.HALTED,
+                        "Conversation halted by user", null, null));
+            } else {
+                log.error("Error occurred during LangGraph turn execution for session {}", sessionId, ex);
+                eventConsumer.accept(new AgentEvent(AgentEventType.ERROR, ex.getMessage(), null, null));
+            }
+        } finally {
+            turnExecutionManager.finishTurn(sessionId);
         }
+    }
+
+    @Override
+    public boolean haltTurn(String sessionId) {
+        return turnExecutionManager.haltTurn(sessionId);
+    }
+
+    @Override
+    public boolean isTurnActive(String sessionId) {
+        return turnExecutionManager.isTurnActive(sessionId);
     }
 
     /**
@@ -219,9 +271,14 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
      */
     private Map<String, Object> callModel(
             AgentGraphState state,
+            String sessionId,
             ChatModel chatModel,
             ChatOptions chatOptions,
             Consumer<AgentEvent> eventConsumer) {
+
+        if (turnExecutionManager.isHalted(sessionId) || Thread.currentThread().isInterrupted()) {
+            return Map.of(MessagesState.MESSAGES_STATE, List.of(new AssistantMessage("")));
+        }
 
         List<Message> currentMessages = new ArrayList<>(state.messages());
 
@@ -272,6 +329,11 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
             String sessionId,
             Consumer<AgentEvent> eventConsumer) {
 
+        if (turnExecutionManager.isHalted(sessionId) || Thread.currentThread().isInterrupted()) {
+            log.info("Turn execution halted for session: {}, terminating graph", sessionId);
+            return GraphDefinition.END;
+        }
+
         Optional<Message> lastMessageOpt = state.lastMessage();
         if (lastMessageOpt.isEmpty()) {
             return GraphDefinition.END;
@@ -318,12 +380,22 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
 
         // Execute tool calls concurrently via virtual threads
         List<CompletableFuture<ToolResponseMessage.ToolResponse>> futures = toolCalls.stream()
-                .map(toolCall -> CompletableFuture.supplyAsync(() -> executeSingleTool(
-                        toolCall, sessionId, sessionMode, toolsByName, eventConsumer), toolExecutor))
+                .map(toolCall -> {
+                    CompletableFuture<ToolResponseMessage.ToolResponse> future = CompletableFuture.supplyAsync(() -> executeSingleTool(
+                            toolCall, sessionId, sessionMode, toolsByName, eventConsumer), toolExecutor);
+                    turnExecutionManager.registerToolFuture(sessionId, future);
+                    return future;
+                })
                 .toList();
 
         List<ToolResponseMessage.ToolResponse> responses = futures.stream()
-                .map(CompletableFuture::join)
+                .map(future -> {
+                    try {
+                        return future.join();
+                    } catch (Exception ex) {
+                        return new ToolResponseMessage.ToolResponse("cancelled", "tool", "Tool execution cancelled or interrupted.");
+                    }
+                })
                 .toList();
 
         ToolResponseMessage toolResponseMessage = ToolResponseMessage.builder()
@@ -354,6 +426,12 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
         String input = toolCall.arguments();
 
         log.debug("Executing tool '{}' (callId={}) with input: {}", toolName, toolCallId, input);
+
+        if (turnExecutionManager.isHalted(sessionId) || Thread.currentThread().isInterrupted()) {
+            String haltedMsg = "Tool execution cancelled: turn was halted.";
+            log.info(haltedMsg);
+            return new ToolResponseMessage.ToolResponse(toolCallId, toolName, haltedMsg);
+        }
 
         // 1. Emit TOOL_CALL event
         eventConsumer.accept(new AgentEvent(AgentEventType.TOOL_CALL, input != null ? input : "{}", toolName, toolCallId));
@@ -403,6 +481,12 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
         }
 
         // 3. Tool execution with fault tolerance
+        if (turnExecutionManager.isHalted(sessionId) || Thread.currentThread().isInterrupted()) {
+            String haltedMsg = "Tool execution cancelled: turn was halted.";
+            log.info(haltedMsg);
+            return new ToolResponseMessage.ToolResponse(toolCallId, toolName, haltedMsg);
+        }
+
         String output;
         try {
             ToolCallback callback = tool.toToolCallback();
@@ -411,6 +495,11 @@ public class LangGraphTurnEngineImpl implements TurnEngine {
                 output = "Tool executed successfully with no output.";
             }
         } catch (Exception ex) {
+            if (turnExecutionManager.isHalted(sessionId) || Thread.currentThread().isInterrupted() || ex instanceof InterruptedException) {
+                String outputHalt = "Tool execution interrupted: turn was halted.";
+                log.info(outputHalt);
+                return new ToolResponseMessage.ToolResponse(toolCallId, toolName, outputHalt);
+            }
             log.error("Tool execution failed for '{}': {}", toolName, ex.getMessage(), ex);
             output = "Tool execution failed: " + ex.getMessage();
             eventConsumer.accept(new AgentEvent(AgentEventType.ERROR, output, toolName, toolCallId));

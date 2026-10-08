@@ -310,5 +310,49 @@ class LangGraphTurnEngineTest {
 
         assertEquals(AgentEventType.COMPLETED, emittedEvents.get(emittedEvents.size() - 1).type());
     }
+
+    @Test
+    @DisplayName("Turn Halting: haltTurn halts execution -> Emits HALTED event and saves message to memory")
+    void testTurnHalting() {
+        String sessionId = "test-session-halt";
+        String userPrompt = "Start long job";
+
+        when(convMemoryService.getSession(sessionId)).thenReturn(Optional.empty());
+        when(chatModelRouter.resolveChatModel(any(), any(), any(), any())).thenReturn(chatModel);
+        when(convMemoryService.getConversationHistory(sessionId)).thenReturn(List.of());
+        when(convMemoryService.getSessionMode(sessionId)).thenReturn(AgentMode.FULL);
+
+        AgentTool mockTool = mock(AgentTool.class);
+        ToolCallback mockCallback = mock(ToolCallback.class);
+        when(mockTool.getName()).thenReturn("file_read");
+        when(mockTool.toToolCallback()).thenReturn(mockCallback);
+        when(toolRegistry.getAllTools()).thenReturn(List.of(mockTool));
+
+        when(permissionEngine.evaluate(eq(AgentMode.FULL), eq("file_read"), any()))
+                .thenReturn(PermissionDecision.allow());
+
+        // During tool execution, trigger halt!
+        when(mockCallback.call(anyString())).thenAnswer(invocation -> {
+            turnEngine.haltTurn(sessionId);
+            return "File read complete";
+        });
+
+        ToolCall toolCall = new ToolCall("call_001", "function", "file_read", "{\"path\": \"test.txt\"}");
+        AssistantMessage step1Assistant = AssistantMessage.builder()
+                .toolCalls(List.of(toolCall))
+                .build();
+        ChatResponse step1Response = new ChatResponse(List.of(new Generation(step1Assistant)));
+        when(chatModel.call(any(Prompt.class))).thenReturn(step1Response);
+
+        List<AgentEvent> emittedEvents = new ArrayList<>();
+        turnEngine.executeTurn(sessionId, userPrompt, emittedEvents::add);
+
+        List<AgentEventType> eventTypes = emittedEvents.stream().map(AgentEvent::type).toList();
+        assertTrue(eventTypes.contains(AgentEventType.STARTED));
+        assertTrue(eventTypes.contains(AgentEventType.HALTED));
+        assertFalse(eventTypes.contains(AgentEventType.COMPLETED));
+
+        verify(convMemoryService).saveMessage(sessionId, MessageType.ASSISTANT.name(), "[Conversation halted by user]");
+    }
 }
 

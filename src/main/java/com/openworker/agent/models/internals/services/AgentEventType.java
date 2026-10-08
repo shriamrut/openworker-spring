@@ -7,5 +7,6 @@ public enum AgentEventType {
     TOOL_RESULT,
     PERMISSION_REQUIRED,
     COMPLETED,
-    ERROR;
+    ERROR,
+    HALTED;
 }
