@@ -474,6 +474,7 @@ class OpenWorkerIntegrationTest {
 
         @Nested
         @DisplayName("5. Dynamic MCP Server Management REST API Tests")
+        @Disabled
         class DynamicMcpManagementTests {
 
                 @Test

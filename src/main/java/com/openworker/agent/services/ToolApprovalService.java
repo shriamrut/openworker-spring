@@ -109,4 +109,24 @@ public class ToolApprovalService {
     public boolean hasPendingApproval(String toolCallId) {
         return pendingApprovals.containsKey(toolCallId);
     }
+
+    /**
+     * Cancels all pending approvals for the specified session, unblocking waiting threads immediately.
+     */
+    public void cancelApprovalsForSession(String sessionId) {
+        if (sessionId == null) {
+            return;
+        }
+        for (Map.Entry<String, ApprovalRequestDetails> entry : pendingDetails.entrySet()) {
+            if (sessionId.equals(entry.getValue().sessionId())) {
+                String toolCallId = entry.getKey();
+                CompletableFuture<Boolean> future = pendingApprovals.remove(toolCallId);
+                pendingDetails.remove(toolCallId);
+                if (future != null && !future.isDone()) {
+                    log.info("Cancelling pending approval for toolCallId={} in session {}", toolCallId, sessionId);
+                    future.cancel(true);
+                }
+            }
+        }
+    }
 }

@@ -43,6 +43,15 @@ public class InstrumentedToolCallback implements ToolCallback {
         }
     }
 
+    /**
+     * Thrown when an active turn is halted by the user.
+     */
+    public static class TurnHaltedException extends RuntimeException {
+        public TurnHaltedException(String message) {
+            super(message);
+        }
+    }
+
     private final AgentTool delegateTool;
     private final ToolCallback delegateCallback;
     private final PermissionEngine permissionEngine;
@@ -54,6 +63,7 @@ public class InstrumentedToolCallback implements ToolCallback {
     private final BiConsumer<String, String> stepRecorder;
     private final ToolApprovalService toolApprovalService;
     private final String sessionId;
+    private final com.openworker.agent.services.TurnExecutionManager turnExecutionManager;
 
     public InstrumentedToolCallback(
             AgentTool delegateTool,
@@ -64,7 +74,7 @@ public class InstrumentedToolCallback implements ToolCallback {
             int maxSteps,
             ObjectMapper objectMapper,
             BiConsumer<String, String> stepRecorder) {
-        this(delegateTool, permissionEngine, sessionMode, eventConsumer, stepCounter, maxSteps, objectMapper, stepRecorder, null, null);
+        this(delegateTool, permissionEngine, sessionMode, eventConsumer, stepCounter, maxSteps, objectMapper, stepRecorder, null, null, null);
     }
 
     public InstrumentedToolCallback(
@@ -78,6 +88,21 @@ public class InstrumentedToolCallback implements ToolCallback {
             BiConsumer<String, String> stepRecorder,
             ToolApprovalService toolApprovalService,
             String sessionId) {
+        this(delegateTool, permissionEngine, sessionMode, eventConsumer, stepCounter, maxSteps, objectMapper, stepRecorder, toolApprovalService, sessionId, null);
+    }
+
+    public InstrumentedToolCallback(
+            AgentTool delegateTool,
+            PermissionEngine permissionEngine,
+            AgentMode sessionMode,
+            Consumer<AgentEvent> eventConsumer,
+            AtomicInteger stepCounter,
+            int maxSteps,
+            ObjectMapper objectMapper,
+            BiConsumer<String, String> stepRecorder,
+            ToolApprovalService toolApprovalService,
+            String sessionId,
+            com.openworker.agent.services.TurnExecutionManager turnExecutionManager) {
         this.delegateTool = Objects.requireNonNull(delegateTool, "delegateTool must not be null");
         this.delegateCallback = Objects.requireNonNull(delegateTool.toToolCallback(), "delegateCallback must not be null");
         this.permissionEngine = Objects.requireNonNull(permissionEngine, "permissionEngine must not be null");
@@ -89,6 +114,7 @@ public class InstrumentedToolCallback implements ToolCallback {
         this.stepRecorder = stepRecorder;
         this.toolApprovalService = toolApprovalService;
         this.sessionId = sessionId;
+        this.turnExecutionManager = turnExecutionManager;
     }
 
     @Override
@@ -103,6 +129,10 @@ public class InstrumentedToolCallback implements ToolCallback {
 
     @Override
     public String call(String input) {
+        if ((turnExecutionManager != null && turnExecutionManager.isHalted(sessionId)) || Thread.currentThread().isInterrupted()) {
+            throw new TurnHaltedException("Conversation halted by user");
+        }
+
         String toolName = delegateTool.getName();
         String toolCallId = "call_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         log.debug("Step intercepted for tool '{}', input: {}", toolName, input);

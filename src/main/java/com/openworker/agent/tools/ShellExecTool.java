@@ -99,6 +99,10 @@ public class ShellExecTool implements AgentTool {
             int exitCode = process.exitValue();
             return String.format("Exit Code: %d\n\nOutput:\n%s", exitCode,
                     output.isEmpty() ? "(No output)" : output.toString());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            log.warn("Shell execution interrupted for command: {}", command);
+            return "Command execution interrupted.";
         } catch (Exception ex) {
             log.error("Failed to execute command: {}", command, ex);
             return "Error executing command: " + ex.getMessage();

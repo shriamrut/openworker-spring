@@ -32,4 +32,24 @@ public interface TurnEngine {
             Consumer<AgentEvent> eventConsumer) {
         executeTurn(sessionId, userPrompt, eventConsumer);
     }
+
+    /**
+     * Halts an active turn for the given session.
+     *
+     * @param sessionId the session id
+     * @return true if an active turn was found and halt was initiated, false otherwise
+     */
+    default boolean haltTurn(String sessionId) {
+        return false;
+    }
+
+    /**
+     * Checks if a turn is actively running for the given session.
+     *
+     * @param sessionId the session id
+     * @return true if a turn is in progress, false otherwise
+     */
+    default boolean isTurnActive(String sessionId) {
+        return false;
+    }
 }

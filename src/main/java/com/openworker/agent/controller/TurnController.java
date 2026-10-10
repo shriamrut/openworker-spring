@@ -21,7 +21,10 @@ import com.openworker.agent.models.publics.PermissionDecisionRequest;
 import com.openworker.agent.models.publics.TurnRequest;
 import com.openworker.agent.services.ConversationMemoryService;
 import com.openworker.agent.services.ToolApprovalService;
+import com.openworker.agent.services.TurnExecutionManager;
 import com.openworker.agent.tools.InstrumentedToolCallback.StepLimitExceededException;
+import com.openworker.agent.models.internals.services.AgentEvent;
+import com.openworker.agent.models.internals.services.AgentEventType;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -33,16 +36,19 @@ public class TurnController {
     private final TurnEngine turnEngine;
     private final ConversationMemoryService memoryService;
     private final ToolApprovalService toolApprovalService;
+    private final TurnExecutionManager turnExecutionManager;
     private final ExecutorService executorService;
     private final Long sseEmitterTimeOut;
 
     TurnController(TurnEngine turnEngine,
             ConversationMemoryService memoryService,
             ToolApprovalService toolApprovalService,
+            TurnExecutionManager turnExecutionManager,
             @Value("${openworker.agent.engine.sseemitter.timeout:5}") Long sseEmitterTimeOut) {
         this.turnEngine = turnEngine;
         this.memoryService = memoryService;
         this.toolApprovalService = toolApprovalService;
+        this.turnExecutionManager = turnExecutionManager;
         this.sseEmitterTimeOut = sseEmitterTimeOut;
         this.executorService = Executors.newVirtualThreadPerTaskExecutor();
     }
@@ -52,7 +58,21 @@ public class TurnController {
         if (turnRequest.mode() != null) {
             memoryService.updateSessionMode(sessionId, turnRequest.mode());
         }
+
         SseEmitter sseEmitter = new SseEmitter(sseEmitterTimeOut * 60_000L);
+        if (turnExecutionManager.isTurnActive(sessionId)) {
+            try {
+                sseEmitter.send(SseEmitter.event().name("agent-event")
+                        .data(new AgentEvent(
+                                AgentEventType.ERROR,
+                                "A turn is already in progress for session: " + sessionId, null, null)));
+                sseEmitter.complete();
+            } catch (Exception ex) {
+                log.error("Unable to emit the event type due to ", ex);
+            }
+            return sseEmitter;
+        }
+
         executorService.submit(() -> {
             try {
                 turnEngine.executeTurn(sessionId, turnRequest.prompt(), turnRequest.provider(), turnRequest.model(), event -> {
@@ -84,6 +104,25 @@ public class TurnController {
             }
         });
         return sseEmitter;
+    }
+
+    @PostMapping(value = {"/{sessionId}/halt", "/{sessionId}/turns/halt"}, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> haltTurn(@PathVariable String sessionId) {
+        log.info("Received request to halt turn for session {}", sessionId);
+        boolean halted = turnExecutionManager.haltTurn(sessionId);
+        if (halted) {
+            return ResponseEntity.ok(Map.of(
+                    "status", "HALTED",
+                    "sessionId", sessionId,
+                    "message", "Turn halted successfully."
+            ));
+        } else {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
+                    "status", "NOT_FOUND",
+                    "sessionId", sessionId,
+                    "message", "No active turn found for session: " + sessionId
+            ));
+        }
     }
 
     @PostMapping(value = "/{sessionId}/permissions/{toolCallId}", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)

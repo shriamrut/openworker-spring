@@ -28,6 +28,8 @@ import com.openworker.agent.services.ConversationMemoryService;
 import com.openworker.agent.services.ToolApprovalService;
 import com.openworker.agent.tools.InstrumentedToolCallback;
 import com.openworker.agent.tools.ToolRegistry;
+import com.openworker.agent.services.TurnExecutionManager;
+import com.openworker.agent.models.internals.db.SessionEntity;
 
 import io.micrometer.common.util.StringUtils;
 import lombok.extern.slf4j.Slf4j;
@@ -50,6 +52,7 @@ public class TurnEngineImpl implements TurnEngine {
     private final ObjectMapper objectMapper;
     private final int maxSteps;
     private final String defaultSystemPrompt;
+    private final com.openworker.agent.services.TurnExecutionManager turnExecutionManager;
 
     @Autowired
     public TurnEngineImpl(
@@ -60,7 +63,8 @@ public class TurnEngineImpl implements TurnEngine {
             PermissionEngine permissionEngine,
             ObjectProvider<ObjectMapper> objectMapperProvider,
             ToolApprovalService toolApprovalService,
-            @Value("${openworker.agent.engine.max-steps:15}") int maxSteps) {
+            @Value("${openworker.agent.engine.max-steps:15}") int maxSteps,
+            TurnExecutionManager turnExecutionManager) {
         this.chatModelRouter = chatModelRouter;
         this.defaultSystemPrompt = defaultSystemPrompt;
         this.toolRegistry = toolRegistry;
@@ -71,6 +75,21 @@ public class TurnEngineImpl implements TurnEngine {
                 ? objectMapperProvider.getIfAvailable()
                 : new ObjectMapper();
         this.maxSteps = maxSteps > 0 ? maxSteps : 15;
+        this.turnExecutionManager = turnExecutionManager != null
+                ? turnExecutionManager
+                : new TurnExecutionManager(toolApprovalService);
+    }
+
+    public TurnEngineImpl(
+            ChatModelRouter chatModelRouter,
+            String defaultSystemPrompt,
+            ToolRegistry toolRegistry,
+            ConversationMemoryService convMemoryService,
+            PermissionEngine permissionEngine,
+            ObjectProvider<ObjectMapper> objectMapperProvider,
+            ToolApprovalService toolApprovalService,
+            int maxSteps) {
+        this(chatModelRouter, defaultSystemPrompt, toolRegistry, convMemoryService, permissionEngine, objectMapperProvider, toolApprovalService, maxSteps, null);
     }
 
     public TurnEngineImpl(
@@ -79,7 +98,17 @@ public class TurnEngineImpl implements TurnEngine {
             ToolRegistry toolRegistry,
             ConversationMemoryService convMemoryService,
             PermissionEngine permissionEngine) {
-        this(chatModelRouter, defaultSystemPrompt, toolRegistry, convMemoryService, permissionEngine, null, null, 15);
+        this(chatModelRouter, defaultSystemPrompt, toolRegistry, convMemoryService, permissionEngine, null, null, 15, null);
+    }
+
+    @Override
+    public boolean haltTurn(String sessionId) {
+        return turnExecutionManager.haltTurn(sessionId);
+    }
+
+    @Override
+    public boolean isTurnActive(String sessionId) {
+        return turnExecutionManager.isTurnActive(sessionId);
     }
 
     @Override
@@ -97,14 +126,22 @@ public class TurnEngineImpl implements TurnEngine {
                             Consumer<AgentEvent> eventConsumer) {
         log.debug("Starting multi-step turn for session with Id: {}, providerOverride={}, modelOverride={}",
                 sessionId, providerOverride, modelOverride);
+
+        if (!turnExecutionManager.startTurn(sessionId, Thread.currentThread())) {
+            String busyMsg = "A turn is already in progress for session: " + sessionId;
+            log.warn(busyMsg);
+            eventConsumer.accept(new AgentEvent(AgentEventType.ERROR, busyMsg, null, null));
+            return;
+        }
+
         eventConsumer.accept(new AgentEvent(AgentEventType.STARTED,
                 "Turn started for session " + sessionId, null, null));
 
         try {
             // 1. Resolve ChatClient for this turn
             var sessionOpt = convMemoryService.getSession(sessionId);
-            String sessionProvider = sessionOpt.map(com.openworker.agent.models.internals.db.SessionEntity::getModelProvider).orElse(null);
-            String sessionModel = sessionOpt.map(com.openworker.agent.models.internals.db.SessionEntity::getModelName).orElse(null);
+            String sessionProvider = sessionOpt.map(SessionEntity::getModelProvider).orElse(null);
+            String sessionModel = sessionOpt.map(SessionEntity::getModelName).orElse(null);
 
             ChatClient chatClient;
             try {
@@ -146,7 +183,8 @@ public class TurnEngineImpl implements TurnEngine {
                                 );
                             },
                             toolApprovalService,
-                            sessionId))
+                            sessionId,
+                            turnExecutionManager))
                     .toList();
 
             log.debug("Instrumented {} tools for multi-step execution (maxSteps={})",
@@ -171,13 +209,32 @@ public class TurnEngineImpl implements TurnEngine {
 
             log.debug("Multi-step turn finished successfully after {} tool steps", stepCounter.get());
 
-            // 7. Mark as completed
-            eventConsumer.accept(new AgentEvent(AgentEventType.COMPLETED,
-                    "Turn completed for session " + sessionId, null, null));
+            // 7. Mark as completed or halted
+            if (turnExecutionManager.isHalted(sessionId) || Thread.currentThread().isInterrupted()) {
+                log.info("Turn halted for session: {}", sessionId);
+                convMemoryService.saveMessage(sessionId, MessageType.ASSISTANT.name(), "[Conversation halted by user]");
+                eventConsumer.accept(new AgentEvent(AgentEventType.HALTED,
+                        "Conversation halted by user", null, null));
+            } else {
+                eventConsumer.accept(new AgentEvent(AgentEventType.COMPLETED,
+                        "Turn completed for session " + sessionId, null, null));
+            }
 
+        } catch (InstrumentedToolCallback.TurnHaltedException ex) {
+            log.info("Turn halted for session: {}", sessionId);
+            convMemoryService.saveMessage(sessionId, MessageType.ASSISTANT.name(), "[Conversation halted by user]");
+            eventConsumer.accept(new AgentEvent(AgentEventType.HALTED, "Conversation halted by user", null, null));
         } catch (Exception ex) {
-            log.error("Error occurred during turn execution for session {}", sessionId, ex);
-            eventConsumer.accept(new AgentEvent(AgentEventType.ERROR, ex.getMessage(), null, null));
+            if (turnExecutionManager.isHalted(sessionId) || Thread.currentThread().isInterrupted() || ex instanceof InterruptedException) {
+                log.info("Turn halted for session: {}", sessionId);
+                convMemoryService.saveMessage(sessionId, MessageType.ASSISTANT.name(), "[Conversation halted by user]");
+                eventConsumer.accept(new AgentEvent(AgentEventType.HALTED, "Conversation halted by user", null, null));
+            } else {
+                log.error("Error occurred during turn execution for session {}", sessionId, ex);
+                eventConsumer.accept(new AgentEvent(AgentEventType.ERROR, ex.getMessage(), null, null));
+            }
+        } finally {
+            turnExecutionManager.finishTurn(sessionId);
         }
     }
 }
