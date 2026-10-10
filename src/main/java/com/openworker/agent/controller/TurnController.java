@@ -21,7 +21,10 @@ import com.openworker.agent.models.publics.PermissionDecisionRequest;
 import com.openworker.agent.models.publics.TurnRequest;
 import com.openworker.agent.services.ConversationMemoryService;
 import com.openworker.agent.services.ToolApprovalService;
+import com.openworker.agent.services.TurnExecutionManager;
 import com.openworker.agent.tools.InstrumentedToolCallback.StepLimitExceededException;
+import com.openworker.agent.models.internals.services.AgentEvent;
+import com.openworker.agent.models.internals.services.AgentEventType;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -33,14 +36,14 @@ public class TurnController {
     private final TurnEngine turnEngine;
     private final ConversationMemoryService memoryService;
     private final ToolApprovalService toolApprovalService;
-    private final com.openworker.agent.services.TurnExecutionManager turnExecutionManager;
+    private final TurnExecutionManager turnExecutionManager;
     private final ExecutorService executorService;
     private final Long sseEmitterTimeOut;
 
     TurnController(TurnEngine turnEngine,
             ConversationMemoryService memoryService,
             ToolApprovalService toolApprovalService,
-            com.openworker.agent.services.TurnExecutionManager turnExecutionManager,
+            TurnExecutionManager turnExecutionManager,
             @Value("${openworker.agent.engine.sseemitter.timeout:5}") Long sseEmitterTimeOut) {
         this.turnEngine = turnEngine;
         this.memoryService = memoryService;
@@ -60,11 +63,12 @@ public class TurnController {
         if (turnExecutionManager.isTurnActive(sessionId)) {
             try {
                 sseEmitter.send(SseEmitter.event().name("agent-event")
-                        .data(new com.openworker.agent.models.internals.services.AgentEvent(
-                                com.openworker.agent.models.internals.services.AgentEventType.ERROR,
+                        .data(new AgentEvent(
+                                AgentEventType.ERROR,
                                 "A turn is already in progress for session: " + sessionId, null, null)));
                 sseEmitter.complete();
-            } catch (Exception ignored) {
+            } catch (Exception ex) {
+                log.error("Unable to emit the event type due to ", ex);
             }
             return sseEmitter;
         }

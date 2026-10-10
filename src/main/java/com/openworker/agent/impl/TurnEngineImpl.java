@@ -28,6 +28,8 @@ import com.openworker.agent.services.ConversationMemoryService;
 import com.openworker.agent.services.ToolApprovalService;
 import com.openworker.agent.tools.InstrumentedToolCallback;
 import com.openworker.agent.tools.ToolRegistry;
+import com.openworker.agent.services.TurnExecutionManager;
+import com.openworker.agent.models.internals.db.SessionEntity;
 
 import io.micrometer.common.util.StringUtils;
 import lombok.extern.slf4j.Slf4j;
@@ -62,7 +64,7 @@ public class TurnEngineImpl implements TurnEngine {
             ObjectProvider<ObjectMapper> objectMapperProvider,
             ToolApprovalService toolApprovalService,
             @Value("${openworker.agent.engine.max-steps:15}") int maxSteps,
-            com.openworker.agent.services.TurnExecutionManager turnExecutionManager) {
+            TurnExecutionManager turnExecutionManager) {
         this.chatModelRouter = chatModelRouter;
         this.defaultSystemPrompt = defaultSystemPrompt;
         this.toolRegistry = toolRegistry;
@@ -75,7 +77,7 @@ public class TurnEngineImpl implements TurnEngine {
         this.maxSteps = maxSteps > 0 ? maxSteps : 15;
         this.turnExecutionManager = turnExecutionManager != null
                 ? turnExecutionManager
-                : new com.openworker.agent.services.TurnExecutionManager(toolApprovalService);
+                : new TurnExecutionManager(toolApprovalService);
     }
 
     public TurnEngineImpl(
@@ -138,8 +140,8 @@ public class TurnEngineImpl implements TurnEngine {
         try {
             // 1. Resolve ChatClient for this turn
             var sessionOpt = convMemoryService.getSession(sessionId);
-            String sessionProvider = sessionOpt.map(com.openworker.agent.models.internals.db.SessionEntity::getModelProvider).orElse(null);
-            String sessionModel = sessionOpt.map(com.openworker.agent.models.internals.db.SessionEntity::getModelName).orElse(null);
+            String sessionProvider = sessionOpt.map(SessionEntity::getModelProvider).orElse(null);
+            String sessionModel = sessionOpt.map(SessionEntity::getModelName).orElse(null);
 
             ChatClient chatClient;
             try {
